@@ -11,12 +11,18 @@ class RegistryCleaner:
             (winreg.HKEY_LOCAL_MACHINE, r"Software")
         ]
         
-        # Специфічні шляхи, де часто залишаються сліди запусків (MuiCache, UserAssist тощо)
+        # Специфічні шляхи, де часто залишаються сліди запусків
         self.priority_paths = [
             (winreg.HKEY_CURRENT_USER, r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache"),
             (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist"),
             (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU"),
             (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths"),
+            
+            # ShellBags - критично важливо для папок
+            (winreg.HKEY_CURRENT_USER, r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\BagMRU"),
+            (winreg.HKEY_CURRENT_USER, r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\Bags"),
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\Shell\BagMRU"),
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\Shell\Bags"),
         ]
 
     def backup_key(self, root_str, key_path):
@@ -42,7 +48,7 @@ class RegistryCleaner:
 
     def clean(self, keywords):
         """Запуск очищення."""
-        logger.info("Пошук у пріоритетних зонах (MuiCache та ін.)...")
+        logger.info("Пошук у пріоритетних зонах (MuiCache, ShellBags та ін.)...")
         for root, path in self.priority_paths:
             root_str = "HKEY_CURRENT_USER" if root == winreg.HKEY_CURRENT_USER else "HKEY_LOCAL_MACHINE"
             self._recursive_scan(root, path, root_str, keywords)
@@ -55,6 +61,18 @@ class RegistryCleaner:
         logger.info("Очищення реєстру завершено.")
 
     def _recursive_scan(self, root, path, root_str, keywords):
+        # Список виключень (гілки, які не треба чіпати)
+        blacklist = [
+            "Microsoft\\Windows NT\\CurrentVersion\\Perflib", # Тільки системні лічильники
+            "Microsoft\\SystemCertificates",                 # Сертифікати
+            "Microsoft\\Cryptography"                        # Ключі шифрування
+        ]
+        
+        # Перевірка, чи не в чорному списку поточний шлях
+        for item in blacklist:
+            if item.lower() in path.lower():
+                return
+
         try:
             with winreg.OpenKey(root, path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE | winreg.KEY_ENUMERATE_SUB_KEYS) as key:
                 # Перевірка параметрів
@@ -64,7 +82,6 @@ class RegistryCleaner:
                     try:
                         name, value, _ = winreg.EnumValue(key, i)
                         for word in keywords:
-                            # Перевіряємо і назву параметра, і його значення (там часто шлях до файлу)
                             if word.lower() in str(name).lower() or word.lower() in str(value).lower():
                                 logger.warning(f"ЗНАЙДЕНО: {root_str}\\{path} -> {name}")
                                 values_to_delete.append(name)
@@ -72,6 +89,7 @@ class RegistryCleaner:
                     except OSError: continue
 
                 if values_to_delete:
+                    # Для ShellBags робимо бекап і видаляємо все знайдене
                     self.backup_key(root_str, path)
                     for name in values_to_delete:
                         self.delete_value(root, path, name)
@@ -85,6 +103,6 @@ class RegistryCleaner:
                         self._recursive_scan(root, new_path, root_str, keywords)
                     except OSError: continue
                     
-        except FileNotFoundError: pass # Якщо шлях не існує в системі
+        except FileNotFoundError: pass
         except PermissionError: pass
         except Exception: pass
